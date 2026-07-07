@@ -1,0 +1,882 @@
+import "dotenv/config";
+
+import {
+  ActionRowBuilder,
+  AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Client,
+  EmbedBuilder,
+  Events,
+  GatewayIntentBits,
+  type ChatInputCommandInteraction,
+  ModalBuilder,
+  RESTJSONErrorCodes,
+  SlashCommandBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  type ButtonInteraction,
+  type Guild,
+  type GuildMember,
+  type MessageCreateOptions,
+  type ModalSubmitInteraction,
+  type Role,
+  type TextBasedChannel,
+} from "discord.js";
+
+const token = mustGetEnv("DISCORD_BOT_TOKEN");
+const staffChannelId = mustGetEnv("DISCORD_STAFF_CHANNEL_ID");
+const fallbackResultsChannelId = mustGetEnv("DISCORD_RESULTS_CHANNEL_ID");
+const botSecret = mustGetEnv("DISCORD_BOT_SECRET");
+const apiBaseUrl = (process.env.LOUNGE_API_BASE_URL || "https://rr-lounge.com").replace(/\/+$/, "");
+const publicSiteUrl = (process.env.PUBLIC_SITE_URL || process.env.LOUNGE_PUBLIC_SITE_URL || "https://rr-lounge.com").replace(/\/+$/, "");
+const guildId = process.env.DISCORD_GUILD_ID;
+const staffRoleId = process.env.DISCORD_STAFF_ROLE_ID;
+const reporterRoleId = process.env.DISCORD_REPORTER_ROLE_ID || "1523691691804983306";
+const rankEmojiMap = parseRankEmojiMap(process.env.DISCORD_RANK_EMOJIS);
+
+const resultChannelIds = {
+  fallback: fallbackResultsChannelId,
+  rtAll: process.env.DISCORD_RESULTS_RT_ALL_CHANNEL_ID,
+  rtTier1: process.env.DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID,
+  rtTier2: process.env.DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID,
+  rtTier3: process.env.DISCORD_RESULTS_RT_TIER_3_CHANNEL_ID,
+  ctAll: process.env.DISCORD_RESULTS_CT_ALL_CHANNEL_ID,
+  ctTier1: process.env.DISCORD_RESULTS_CT_TIER_1_CHANNEL_ID,
+  ctTier2: process.env.DISCORD_RESULTS_CT_TIER_2_CHANNEL_ID,
+};
+
+const SUBMIT_COMMAND_NAME = "submit_mogi";
+const SUBMIT_MODAL_PREFIX = "submit_mogi_modal:";
+const APPROVE_PREFIX = "approve_mogi:";
+const REJECT_PREFIX = "reject_mogi:";
+const REJECT_MODAL_PREFIX = "reject_mogi_modal:";
+
+type Ladder = "RT" | "CT";
+
+const TIER_CHOICES = [
+  { name: "All", value: "All" },
+  { name: "Tier 1", value: "Tier 1" },
+  { name: "Tier 2", value: "Tier 2" },
+  { name: "Tier 3", value: "Tier 3" },
+] as const;
+
+type SubmissionResponse = {
+  error?: string;
+  eventNumber?: number;
+  format?: string;
+  raceCount?: number;
+  submissionId?: string;
+  tableImageBase64?: string;
+  tier?: string | null;
+};
+
+type RankChange = {
+  direction?: "promoted" | "demoted" | null;
+  discordId?: string | null;
+  playerName?: string;
+  previousRankName?: string | null;
+  rankName?: string | null;
+};
+
+type ApproveResponse = {
+  error?: string;
+  eventNumber?: number;
+  format?: string;
+  mmrImageBase64?: string;
+  mogiId?: string;
+  mogiUrl?: string;
+  raceCount?: number;
+  rankChanges?: RankChange[];
+  tableImageBase64?: string;
+  tier?: string | null;
+};
+
+type SendableTextChannel = TextBasedChannel & {
+  send(options: string | MessageCreateOptions): Promise<unknown>;
+};
+
+const rankRoleMaps: Record<Ladder, Map<string, string>> = {
+  RT: parseRankRoleMap(process.env.DISCORD_RT_RANK_ROLES),
+  CT: parseRankRoleMap(process.env.DISCORD_CT_RANK_ROLES),
+};
+
+function mustGetEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
+}
+
+function normalizeLadder(value: string | null | undefined): Ladder {
+  return value?.toUpperCase() === "CT" ? "CT" : "RT";
+}
+
+function parseOptionalInteger(value: string, fallback: number | null): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) ? parsed : Number.NaN;
+}
+
+function formatLabel(format?: string): string {
+  if (!format) return "-";
+  if (format === "FFA") return "FFA";
+  const match = format.match(/TEAMS_(\d+)/);
+  return match ? `${match[1]}v${match[1]}` : format;
+}
+
+function displayTier(tier: string | null | undefined): string {
+  const trimmed = tier?.trim();
+  return trimmed || "All";
+}
+
+function encodeCustomIdPart(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function decodeCustomIdPart(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function eventIdLabel(value: number | string | null | undefined): string {
+  if (value == null || value === "") return "-";
+  return String(value);
+}
+
+function publicUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (["localhost", "127.0.0.1", "0.0.0.0"].includes(url.hostname)) {
+      return `${publicSiteUrl}${url.pathname}${url.search}${url.hash}`;
+    }
+    return value;
+  } catch {
+    return value;
+  }
+}
+
+function compactName(value: string | null | undefined): string {
+  return (value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function rankEmojiCandidates(rankName: string | null | undefined): string[] {
+  const normalized = compactName(rankName);
+  const withoutTrailingNumber = normalized.replace(/\d+$/, "");
+  return Array.from(new Set([normalized, withoutTrailingNumber].filter(Boolean)));
+}
+
+function playerSearchQueries(playerName: string): string[] {
+  const words = playerName
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 2)
+    .sort((a, b) => b.length - a.length);
+
+  return Array.from(new Set([playerName, ...words].filter((query) => query.trim())));
+}
+
+function parseRankEmojiMap(value: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!value) return map;
+
+  for (const entry of value.split(",")) {
+    const [rawRankName, ...rawEmojiParts] = entry.split("=");
+    const emoji = rawEmojiParts.join("=").trim();
+    if (!rawRankName?.trim() || !emoji) continue;
+
+    for (const key of rankEmojiCandidates(rawRankName)) {
+      map.set(key, emoji);
+    }
+  }
+
+  return map;
+}
+
+function roleIdFrom(value: string): string | null {
+  return value.match(/\d{15,25}/)?.[0] ?? null;
+}
+
+function parseRankRoleMap(value: string | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!value) return map;
+
+  for (const entry of value.split(",")) {
+    const [rawRankName, ...rawRoleParts] = entry.split("=");
+    const roleId = roleIdFrom(rawRoleParts.join("=").trim());
+    if (!rawRankName?.trim() || !roleId) continue;
+
+    for (const key of rankEmojiCandidates(rawRankName)) {
+      map.set(key, roleId);
+    }
+  }
+
+  return map;
+}
+
+function diceCoefficient(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return a[0] === b[0] ? 0.25 : 0;
+
+  const counts = new Map<string, number>();
+  for (let index = 0; index < a.length - 1; index++) {
+    const pair = a.slice(index, index + 2);
+    counts.set(pair, (counts.get(pair) ?? 0) + 1);
+  }
+
+  let matches = 0;
+  for (let index = 0; index < b.length - 1; index++) {
+    const pair = b.slice(index, index + 2);
+    const count = counts.get(pair) ?? 0;
+    if (count <= 0) continue;
+    counts.set(pair, count - 1);
+    matches++;
+  }
+
+  return (2 * matches) / (a.length + b.length - 2);
+}
+
+function memberNames(member: GuildMember): string[] {
+  return [
+    member.displayName,
+    member.nickname,
+    member.user.globalName,
+    member.user.username,
+    member.user.tag,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function memberMatchScore(playerName: string, member: GuildMember): number {
+  const query = compactName(playerName);
+  if (!query) return 0;
+
+  return Math.max(
+    ...memberNames(member).map((name) => {
+      const candidate = compactName(name);
+      if (!candidate) return 0;
+      if (candidate === query) return 100;
+      if (candidate.startsWith(query) || query.startsWith(candidate)) return 90 - Math.abs(candidate.length - query.length);
+      if (candidate.includes(query) || query.includes(candidate)) return 80 - Math.abs(candidate.length - query.length) / 2;
+      return Math.round(diceCoefficient(query, candidate) * 70);
+    })
+  );
+}
+
+async function findClosestMemberByPlayerName(
+  guild: Guild | null,
+  playerName: string | null | undefined
+): Promise<GuildMember | null> {
+  const trimmedName = playerName?.trim();
+  if (!guild || !trimmedName) return null;
+
+  const candidates = new Map<string, GuildMember>();
+  for (const member of guild.members.cache.values()) {
+    if (memberMatchScore(trimmedName, member) >= 45) candidates.set(member.id, member);
+  }
+
+  for (const query of playerSearchQueries(trimmedName)) {
+    const results = await guild.members.search({ query, limit: 25 }).catch(() => null);
+    results?.forEach((member) => candidates.set(member.id, member));
+  }
+
+  let best: { member: GuildMember; score: number } | null = null;
+  for (const member of candidates.values()) {
+    const score = memberMatchScore(trimmedName, member);
+    if (!best || score > best.score) best = { member, score };
+  }
+
+  return best?.member ?? null;
+}
+
+async function rankEmojiFor(rankName: string | null | undefined, guild: Guild | null): Promise<string> {
+  const keys = rankEmojiCandidates(rankName);
+  if (keys.length === 0) return "";
+
+  for (const key of keys) {
+    const configuredEmoji = rankEmojiMap.get(key);
+    if (configuredEmoji) return configuredEmoji;
+  }
+
+  if (!guild) return "";
+  const emojis = await guild.emojis.fetch().catch(() => guild.emojis.cache);
+  const emoji = emojis.find((candidate) => {
+    const emojiKey = rankEmojiCandidates(candidate.name)[0];
+    return keys.includes(emojiKey);
+  });
+
+  return emoji?.toString() ?? "";
+}
+
+function configuredRankRoleId(ladder: Ladder, rankName: string | null | undefined): string | null {
+  for (const key of rankEmojiCandidates(rankName)) {
+    const roleId = rankRoleMaps[ladder].get(key);
+    if (roleId) return roleId;
+  }
+  return null;
+}
+
+function automaticRankRoleScore(ladder: Ladder, rankName: string, role: Role): number {
+  if (role.managed) return 0;
+  const roleName = compactName(role.name);
+  const ladderName = compactName(ladder);
+  const rankKeys = rankEmojiCandidates(rankName);
+  if (!roleName || rankKeys.length === 0) return 0;
+
+  for (const rankKey of rankKeys) {
+    if (roleName === `${ladderName}${rankKey}` || roleName === `${rankKey}${ladderName}`) return 100;
+    if (roleName === `${ladderName}rank${rankKey}` || roleName === `${rankKey}${ladderName}rank`) return 95;
+    if (roleName.includes(ladderName) && roleName.includes(rankKey)) return 80;
+  }
+
+  return 0;
+}
+
+async function rankRoleFor(ladder: Ladder, rankName: string | null | undefined, guild: Guild | null): Promise<Role | null> {
+  const trimmedRank = rankName?.trim();
+  if (!guild || !trimmedRank) return null;
+
+  const configuredRoleId = configuredRankRoleId(ladder, trimmedRank);
+  if (configuredRoleId) {
+    const configuredRole = await guild.roles.fetch(configuredRoleId).catch(() => null);
+    if (configuredRole) return configuredRole;
+  }
+
+  const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+  let best: { role: Role; score: number } | null = null;
+  for (const role of roles.values()) {
+    const score = automaticRankRoleScore(ladder, trimmedRank, role);
+    if (!best || score > best.score) best = { role, score };
+  }
+
+  return best && best.score > 0 ? best.role : null;
+}
+
+async function syncMemberRankRole(
+  member: GuildMember,
+  ladder: Ladder,
+  previousRankName: string | null | undefined,
+  nextRankName: string | null | undefined
+): Promise<void> {
+  try {
+    const nextRole = await rankRoleFor(ladder, nextRankName, member.guild);
+    const previousRole = await rankRoleFor(ladder, previousRankName, member.guild);
+    const roleIdsToRemove = new Set<string>();
+
+    if (previousRole && previousRole.id !== nextRole?.id && member.roles.cache.has(previousRole.id)) {
+      roleIdsToRemove.add(previousRole.id);
+    }
+
+    for (const roleId of rankRoleMaps[ladder].values()) {
+      if (roleId !== nextRole?.id && member.roles.cache.has(roleId)) roleIdsToRemove.add(roleId);
+    }
+
+    if (roleIdsToRemove.size > 0) {
+      await member.roles.remove(Array.from(roleIdsToRemove), `Retro Rewind ${ladder} rank update`);
+    }
+
+    if (nextRole && !member.roles.cache.has(nextRole.id)) {
+      await member.roles.add(nextRole, `Retro Rewind ${ladder} rank update`);
+    }
+  } catch (error) {
+    console.warn(
+      `Could not update ${ladder} rank role for ${member.user.tag} (${member.id})`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+async function buildRankChangeNotice(
+  changes: RankChange[] | undefined,
+  guild: Guild | null,
+  ladder: Ladder
+): Promise<MessageCreateOptions | null> {
+  const lines: string[] = [];
+  const users = new Set<string>();
+
+  for (const change of changes ?? []) {
+    if (!change.direction || !change.rankName || !change.playerName) continue;
+    const member = await findClosestMemberByPlayerName(guild, change.playerName);
+    if (member) await syncMemberRankRole(member, ladder, change.previousRankName, change.rankName);
+    const emoji = await rankEmojiFor(change.rankName, guild);
+    const playerLabel = member ? `<@${member.id}>` : `@${change.playerName}`;
+    const fallbackRank = emoji ? "" : ` ${change.rankName}`;
+    lines.push(`${playerLabel}${emoji ? ` ${emoji}` : fallbackRank}`);
+    if (member) users.add(member.id);
+  }
+
+  if (lines.length === 0) return null;
+  return {
+    content: lines.join("\n"),
+    allowedMentions: { users: Array.from(users) },
+  };
+}
+
+function normalizeTierKey(tier: string | null | undefined): "all" | "1" | "2" | "3" {
+  const normalized = (tier || "").toLowerCase().trim();
+  if (!normalized || /\ball\b/.test(normalized)) return "all";
+  if (/(^|\D)1(\D|$)|\bt1\b|\btier\s*1\b/.test(normalized)) return "1";
+  if (/(^|\D)2(\D|$)|\bt2\b|\btier\s*2\b/.test(normalized)) return "2";
+  if (/(^|\D)3(\D|$)|\bt3\b|\btier\s*3\b/.test(normalized)) return "3";
+  return "all";
+}
+
+function resultChannelIdFor(ladder: Ladder, tier: string | null | undefined): string {
+  const tierKey = normalizeTierKey(tier);
+
+  if (ladder === "CT") {
+    if (tierKey === "1") return resultChannelIds.ctTier1 || resultChannelIds.ctAll || resultChannelIds.fallback;
+    if (tierKey === "2") return resultChannelIds.ctTier2 || resultChannelIds.ctAll || resultChannelIds.fallback;
+    return resultChannelIds.ctAll || resultChannelIds.fallback;
+  }
+
+  if (tierKey === "1") return resultChannelIds.rtTier1 || resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "2") return resultChannelIds.rtTier2 || resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "3") return resultChannelIds.rtTier3 || resultChannelIds.rtAll || resultChannelIds.fallback;
+  return resultChannelIds.rtAll || resultChannelIds.fallback;
+}
+
+function hasStaffPermission(interaction: ButtonInteraction | ModalSubmitInteraction): boolean {
+  if (!staffRoleId) return true;
+  const member = interaction.member as GuildMember | null;
+  return Boolean(member?.roles.cache.has(staffRoleId));
+}
+
+function hasSubmitPermission(interaction: ChatInputCommandInteraction): boolean {
+  const member = interaction.member as GuildMember | null;
+  if (!member) return false;
+  if (reporterRoleId && member.roles.cache.has(reporterRoleId)) return true;
+  if (staffRoleId && member.roles.cache.has(staffRoleId)) return true;
+  return !reporterRoleId && !staffRoleId;
+}
+
+async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-discord-bot-secret": botSecret,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(data.error || `API request failed (${response.status}).`);
+  }
+  return data;
+}
+
+async function getTextChannel(client: Client, channelId: string): Promise<SendableTextChannel> {
+  const channel = await client.channels.fetch(channelId);
+  if (!channel?.isTextBased() || !("send" in channel)) {
+    throw new Error(`Channel ${channelId} is not a sendable text channel.`);
+  }
+  return channel as SendableTextChannel;
+}
+
+async function deleteStaffReviewMessage(client: Client, messageId: string | null | undefined): Promise<void> {
+  if (!messageId) return;
+  const channel = await client.channels.fetch(staffChannelId).catch(() => null);
+  if (!channel?.isTextBased() || !("messages" in channel)) return;
+  await channel.messages.delete(messageId).catch(() => {});
+}
+
+async function registerCommands(client: Client): Promise<void> {
+  const command = new SlashCommandBuilder()
+    .setName(SUBMIT_COMMAND_NAME)
+    .setDescription("Submit a mogi table for updater approval")
+    .addStringOption((option) =>
+      option
+        .setName("ladder")
+        .setDescription("Which ladder this table belongs to")
+        .setRequired(true)
+        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" })
+    )
+    .addStringOption((option) =>
+      option
+        .setName("tier")
+        .setDescription("Which tier this mogi belongs to")
+        .setRequired(true)
+        .addChoices(...TIER_CHOICES)
+    );
+
+  if (guildId) {
+    const guild = await client.guilds.fetch(guildId);
+    await guild.commands.set([command]);
+    console.log(`Registered /${SUBMIT_COMMAND_NAME} in guild ${guildId}`);
+    return;
+  }
+
+  if (!client.application) throw new Error("Discord application is not ready.");
+  await client.application.commands.set([command]);
+  console.log(`Registered global /${SUBMIT_COMMAND_NAME}`);
+}
+
+function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
+  const tableText = new TextInputBuilder()
+    .setCustomId("tableText")
+    .setLabel("Final table text")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(4000);
+
+  const races = new TextInputBuilder()
+    .setCustomId("raceCount")
+    .setLabel("Race count")
+    .setPlaceholder("12")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(2);
+
+  const room = new TextInputBuilder()
+    .setCustomId("roomNumber")
+    .setLabel("Room number")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(false)
+    .setMaxLength(10);
+
+  const notes = new TextInputBuilder()
+    .setCustomId("notes")
+    .setLabel("Notes")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(500);
+
+  return new ModalBuilder()
+    .setCustomId(`${SUBMIT_MODAL_PREFIX}${ladder}:${encodeCustomIdPart(tier)}`)
+    .setTitle(`Submit ${ladder} ${displayTier(tier)}`)
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(tableText),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(races),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(room),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(notes)
+    );
+}
+
+function reviewButtons(submissionId: string, disabled = false) {
+  return [
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${APPROVE_PREFIX}${submissionId}`)
+        .setLabel("Approve")
+        .setEmoji("\u2705")
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(`${REJECT_PREFIX}${submissionId}`)
+        .setLabel("Reject")
+        .setEmoji("\u274C")
+        .setStyle(ButtonStyle.Danger)
+        .setDisabled(disabled)
+    ),
+  ];
+}
+
+function embedField(interaction: ButtonInteraction, name: string): string {
+  const field = interaction.message.embeds[0]?.fields.find(
+    (candidate) => candidate.name.toLowerCase() === name.toLowerCase()
+  );
+  return field?.value ?? "";
+}
+
+function parseSubmitModalCustomId(customId: string): { ladder: Ladder; tier: string } {
+  const [ladderValue, tierValue] = customId.slice(SUBMIT_MODAL_PREFIX.length).split(":");
+  return {
+    ladder: normalizeLadder(ladderValue),
+    tier: displayTier(decodeCustomIdPart(tierValue)),
+  };
+}
+
+async function handleSubmitModal(
+  interaction: ModalSubmitInteraction,
+  ladder: Ladder,
+  tier: string
+): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
+
+  const sourceText = interaction.fields.getTextInputValue("tableText");
+  const notes = interaction.fields.getTextInputValue("notes").trim();
+  const raceCount = parseOptionalInteger(interaction.fields.getTextInputValue("raceCount"), 12);
+  const roomNumber = parseOptionalInteger(interaction.fields.getTextInputValue("roomNumber"), null);
+
+  if (!Number.isInteger(raceCount) || raceCount == null || raceCount < 1 || raceCount > 99) {
+    await interaction.editReply("Race count must be a number between 1 and 99.");
+    return;
+  }
+  if (Number.isNaN(roomNumber)) {
+    await interaction.editReply("Room number must be blank or a whole number.");
+    return;
+  }
+
+  const submission = await apiPost<SubmissionResponse>("/api/discord/submissions", {
+    sourceText,
+    category: ladder,
+    tier,
+    notes: [notes, `Discord ladder: ${ladder}`].filter(Boolean).join("\n"),
+    raceCount,
+    roomNumber,
+    submittedByDiscordId: interaction.user.id,
+    submittedFromChannelId: interaction.channelId,
+  });
+
+  if (!submission.submissionId || !submission.tableImageBase64) {
+    throw new Error(submission.error || "Submission API did not return a table image.");
+  }
+
+  const tierLabel = displayTier(submission.tier || tier);
+  const eventId = eventIdLabel(submission.eventNumber);
+  const destinationId = resultChannelIdFor(ladder, tierLabel);
+  const image = new AttachmentBuilder(Buffer.from(submission.tableImageBase64, "base64"), {
+    name: "mogi-table.png",
+  });
+  const embed = new EmbedBuilder()
+    .setAuthor({ name: "Updater Automation" })
+    .setTitle("Mogi Table")
+    .setDescription("Check this update, then approve it if everything looks right.")
+    .setColor(0xed4245)
+    .addFields(
+      { name: "Submission ID", value: eventId, inline: true },
+      { name: "Ladder", value: ladder, inline: true },
+      { name: "Tier", value: tierLabel, inline: true },
+      { name: "Races Played", value: String(submission.raceCount ?? raceCount), inline: true },
+      { name: "Submitted by", value: `<@${interaction.user.id}>`, inline: true },
+      { name: "Posts to", value: `<#${destinationId}>`, inline: true }
+    )
+    .setImage("attachment://mogi-table.png")
+    .setTimestamp();
+
+  const staffChannel = await getTextChannel(interaction.client, staffChannelId);
+  await staffChannel.send({
+    embeds: [embed],
+    files: [image],
+    components: reviewButtons(submission.submissionId),
+  });
+
+  await interaction.editReply("Submitted for updater review.");
+}
+
+async function handleApprove(interaction: ButtonInteraction, submissionId: string): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({ content: "You do not have permission to approve mogis.", ephemeral: true });
+    return;
+  }
+
+  const ladder = normalizeLadder(embedField(interaction, "Ladder"));
+  const tier = embedField(interaction, "Tier") || "All";
+  const destinationId = resultChannelIdFor(ladder, tier);
+
+  await interaction.deferReply({ ephemeral: true });
+  const result = await apiPost<ApproveResponse>(`/api/discord/submissions/${submissionId}/approve`, {
+    approvedByDiscordId: interaction.user.id,
+  });
+
+  if (!result.mogiId || !result.mogiUrl || !result.tableImageBase64 || !result.mmrImageBase64) {
+    throw new Error(result.error || "Approval API did not return the result images.");
+  }
+
+  const approvedTier = displayTier(result.tier || tier);
+  const approvedEventId = eventIdLabel(result.eventNumber ?? result.mogiId);
+  const mogiUrl = publicUrl(result.mogiUrl);
+  const tableImage = new AttachmentBuilder(Buffer.from(result.tableImageBase64, "base64"), {
+    name: "result-table.png",
+  });
+  const mmrImage = new AttachmentBuilder(Buffer.from(result.mmrImageBase64, "base64"), {
+    name: "mmr-table.png",
+  });
+  const resultEmbed = new EmbedBuilder()
+    .setAuthor({ name: "Updater Automation" })
+    .setTitle("Result Table")
+    .setColor(0xed4245)
+    .addFields(
+      { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
+      { name: "Tier", value: approvedTier, inline: true },
+      { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
+      { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
+      { name: "View on website", value: `[Message](${mogiUrl})`, inline: true }
+    )
+    .setImage("attachment://result-table.png")
+    .setTimestamp();
+
+  const mmrEmbed = new EmbedBuilder()
+    .setTitle("MMR Table")
+    .setColor(0x2f80ed)
+    .addFields(
+      { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
+      { name: "Tier", value: approvedTier, inline: true },
+      { name: "Updated by", value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setImage("attachment://mmr-table.png")
+    .setTimestamp();
+
+  const resultsChannel = await getTextChannel(interaction.client, destinationId);
+  await resultsChannel.send({ embeds: [resultEmbed], files: [tableImage] });
+  await resultsChannel.send({ embeds: [mmrEmbed], files: [mmrImage] });
+  const rankNotice = await buildRankChangeNotice(result.rankChanges, interaction.guild, ladder);
+  if (rankNotice) {
+    await resultsChannel.send(rankNotice);
+  }
+  await interaction.message.delete().catch(() => {});
+  await interaction.editReply(`Approved event ${approvedEventId} and posted in <#${destinationId}>: ${mogiUrl}`);
+}
+
+async function handleRejectButton(interaction: ButtonInteraction, submissionId: string): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({ content: "You do not have permission to reject mogis.", ephemeral: true });
+    return;
+  }
+
+  const reason = new TextInputBuilder()
+    .setCustomId("reason")
+    .setLabel("Reject reason")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(500);
+
+  await interaction.showModal(
+    new ModalBuilder()
+      .setCustomId(
+        `${REJECT_MODAL_PREFIX}${submissionId}:${interaction.message.id}:${encodeCustomIdPart(
+          eventIdLabel(embedField(interaction, "Submission ID"))
+        )}`
+      )
+      .setTitle("Reject mogi")
+      .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(reason))
+  );
+}
+
+function parseRejectModalCustomId(customId: string): {
+  submissionId: string;
+  messageId: string;
+  eventId: string;
+} {
+  const [submissionId = "", messageId = "", eventId = ""] = customId
+    .slice(REJECT_MODAL_PREFIX.length)
+    .split(":");
+
+  return {
+    submissionId,
+    messageId,
+    eventId: decodeCustomIdPart(eventId),
+  };
+}
+
+async function handleRejectModal(
+  interaction: ModalSubmitInteraction,
+  submissionId: string,
+  messageId: string,
+  eventId: string
+): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({ content: "You do not have permission to reject mogis.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const reason = interaction.fields.getTextInputValue("reason").trim();
+  await apiPost(`/api/discord/submissions/${submissionId}/reject`, {
+    rejectedByDiscordId: interaction.user.id,
+    reason,
+  });
+
+  await deleteStaffReviewMessage(interaction.client, messageId);
+  const staffChannel = await getTextChannel(interaction.client, staffChannelId);
+  await staffChannel.send({
+    content: [
+      `Rejected submission ${eventId || submissionId}.`,
+      `Rejected by <@${interaction.user.id}>.`,
+      reason ? `Reason: ${reason}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    allowedMentions: { users: [interaction.user.id] },
+  });
+  await interaction.editReply("Submission rejected.");
+}
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+
+client.once(Events.ClientReady, async (readyClient) => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
+  await registerCommands(readyClient);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  try {
+    if (interaction.isChatInputCommand() && interaction.commandName === SUBMIT_COMMAND_NAME) {
+      if (!hasSubmitPermission(interaction)) {
+        await interaction.reply({
+          content: "You need the Reporter role to submit mogis.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const ladder = normalizeLadder(interaction.options.getString("ladder"));
+      const tier = displayTier(interaction.options.getString("tier"));
+      if (ladder === "CT" && normalizeTierKey(tier) === "3") {
+        await interaction.reply({
+          content: "CT only supports All, Tier 1, or Tier 2 right now.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.showModal(buildSubmitModal(ladder, tier));
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(SUBMIT_MODAL_PREFIX)) {
+      const { ladder, tier } = parseSubmitModalCustomId(interaction.customId);
+      await handleSubmitModal(interaction, ladder, tier);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(APPROVE_PREFIX)) {
+      await handleApprove(interaction, interaction.customId.slice(APPROVE_PREFIX.length));
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(REJECT_PREFIX)) {
+      await handleRejectButton(interaction, interaction.customId.slice(REJECT_PREFIX.length));
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(REJECT_MODAL_PREFIX)) {
+      const { submissionId, messageId, eventId } = parseRejectModalCustomId(interaction.customId);
+      await handleRejectModal(interaction, submissionId, messageId, eventId);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Something went wrong.";
+    console.error("Discord interaction failed", error);
+    if (interaction.isRepliable()) {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(message).catch(() => {});
+      } else {
+        await interaction.reply({ content: message, ephemeral: true }).catch((replyError) => {
+          if (
+            typeof replyError === "object" &&
+            replyError !== null &&
+            "code" in replyError &&
+            replyError.code === RESTJSONErrorCodes.UnknownInteraction
+          ) {
+            return;
+          }
+          console.error("Could not report interaction error", replyError);
+        });
+      }
+    }
+  }
+});
+
+client.login(token);
+
+
