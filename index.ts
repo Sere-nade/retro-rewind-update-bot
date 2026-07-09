@@ -38,12 +38,12 @@ const rankEmojiMap = parseRankEmojiMap(process.env.DISCORD_RANK_EMOJIS);
 
 const resultChannelIds = {
   fallback: fallbackResultsChannelId,
-  rtAll: process.env.DISCORD_RESULTS_RT_ALL_CHANNEL_ID,
-  rtTier1: process.env.DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID,
-  rtTier2: process.env.DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID,
-  rtAll32: process.env.DISCORD_RESULTS_RT_ALL_32_TRACKS_CHANNEL_ID,
-  rtLegend: process.env.DISCORD_RESULTS_RT_LEGEND_CHANNEL_ID,
-  rtMaster: process.env.DISCORD_RESULTS_RT_MASTER_CHANNEL_ID,
+  rrAll: process.env.DISCORD_RESULTS_RR_ALL_CHANNEL_ID,
+  rrTier1: process.env.DISCORD_RESULTS_RR_TIER_1_CHANNEL_ID,
+  rrTier2: process.env.DISCORD_RESULTS_RR_TIER_2_CHANNEL_ID,
+  rrAll32: process.env.DISCORD_RESULTS_RR_ALL_32_TRACKS_CHANNEL_ID,
+  rrLegend: process.env.DISCORD_RESULTS_RR_LEGEND_CHANNEL_ID,
+  rrMaster: process.env.DISCORD_RESULTS_RR_MASTER_CHANNEL_ID,
   ctAll: process.env.DISCORD_RESULTS_CT_ALL_CHANNEL_ID,
   ttAll: process.env.DISCORD_RESULTS_TT_ALL_CHANNEL_ID,
 };
@@ -55,11 +55,11 @@ const APPROVE_PREFIX = "approve_mogi:";
 const REJECT_PREFIX = "reject_mogi:";
 const REJECT_MODAL_PREFIX = "reject_mogi_modal:";
 
-type Ladder = "RT" | "CT" | "TT";
+type Ladder = "RR" | "CT" | "TT";
 
 type TierChoice = { name: string; value: string };
 
-const RT_TIER_CHOICES = [
+const RR_TIER_CHOICES = [
   { name: "All Tier", value: "All Tier" },
   { name: "Tier 1", value: "Tier 1" },
   { name: "Tier 2", value: "Tier 2" },
@@ -124,7 +124,7 @@ type SendableTextChannel = TextBasedChannel & {
 };
 
 const rankRoleMaps: Record<Ladder, Map<string, string>> = {
-  RT: parseRankRoleMap(process.env.DISCORD_RT_RANK_ROLES),
+  RR: parseRankRoleMap(process.env.DISCORD_RR_RANK_ROLES),
   CT: parseRankRoleMap(process.env.DISCORD_CT_RANK_ROLES),
   TT: parseRankRoleMap(process.env.DISCORD_TT_RANK_ROLES),
 };
@@ -139,7 +139,7 @@ function normalizeLadder(value: string | null | undefined): Ladder {
   const normalized = value?.toUpperCase();
   if (normalized === "CT") return "CT";
   if (normalized === "TT") return "TT";
-  return "RT";
+  return "RR";
 }
 
 function parseOptionalInteger(value: string, fallback: number | null): number | null {
@@ -164,7 +164,7 @@ function displayTier(tier: string | null | undefined): string {
 function tierChoicesForLadder(ladder: Ladder): readonly TierChoice[] {
   if (ladder === "CT") return CT_TIER_CHOICES;
   if (ladder === "TT") return TT_TIER_CHOICES;
-  return RT_TIER_CHOICES;
+  return RR_TIER_CHOICES;
 }
 
 function tierMatchesChoice(ladder: Ladder, tier: string): boolean {
@@ -505,12 +505,12 @@ function resultChannelIdFor(ladder: Ladder, tier: string | null | undefined): st
     return resultChannelIds.ctAll || resultChannelIds.fallback;
   }
 
-  if (tierKey === "1") return resultChannelIds.rtTier1 || resultChannelIds.rtAll || resultChannelIds.fallback;
-  if (tierKey === "2") return resultChannelIds.rtTier2 || resultChannelIds.rtAll || resultChannelIds.fallback;
-  if (tierKey === "all32") return resultChannelIds.rtAll32 || resultChannelIds.rtAll || resultChannelIds.fallback;
-  if (tierKey === "legend") return resultChannelIds.rtLegend || resultChannelIds.rtAll || resultChannelIds.fallback;
-  if (tierKey === "master") return resultChannelIds.rtMaster || resultChannelIds.rtAll || resultChannelIds.fallback;
-  return resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "1") return resultChannelIds.rrTier1 || resultChannelIds.rrAll || resultChannelIds.fallback;
+  if (tierKey === "2") return resultChannelIds.rrTier2 || resultChannelIds.rrAll || resultChannelIds.fallback;
+  if (tierKey === "all32") return resultChannelIds.rrAll32 || resultChannelIds.rrAll || resultChannelIds.fallback;
+  if (tierKey === "legend") return resultChannelIds.rrLegend || resultChannelIds.rrAll || resultChannelIds.fallback;
+  if (tierKey === "master") return resultChannelIds.rrMaster || resultChannelIds.rrAll || resultChannelIds.fallback;
+  return resultChannelIds.rrAll || resultChannelIds.fallback;
 }
 
 function hasStaffPermission(
@@ -592,7 +592,7 @@ async function registerCommands(client: Client): Promise<void> {
         .setName("ladder")
         .setDescription("Which ladder this table belongs to")
         .setRequired(true)
-        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
+        .addChoices({ name: "RR", value: "RR" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
     )
     .addStringOption((option) =>
       option
@@ -609,7 +609,7 @@ async function registerCommands(client: Client): Promise<void> {
         .setName("ladder")
         .setDescription("Which ladder to adjust")
         .setRequired(true)
-        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
+        .addChoices({ name: "RR", value: "RR" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
     )
     .addStringOption((option) =>
       option
