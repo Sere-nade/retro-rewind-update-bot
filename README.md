@@ -100,11 +100,26 @@ that server quickly. Without it, Discord registers the command globally, which c
 1. User runs `/submit_mogi` and chooses RR/CT/TT plus the tier from dropdowns.
 2. Bot opens a modal for table text, race count, room number, and notes.
 3. Bot posts a preview in the hidden staff channel, including where it will post after approval.
-4. Staff clicks approve or reject.
-5. Approval creates the mogi on the website and posts the result table image plus website link in
+4. Staff can click **Add penalty** to attach per-player mogi penalties before approval.
+5. Staff clicks approve or reject.
+6. Approval creates the mogi on the website and posts the result table image plus website link in
    the correct RR/CT/tier results channel.
-6. Approval deletes the staff preview message. Rejection deletes the staff preview message and
+7. Approval deletes the staff preview message. Rejection deletes the staff preview message and
    posts a short rejection note in the staff channel.
+
+## Mogi penalties during approval
+
+In the staff preview channel, click **Add penalty** before approving a mogi. Enter one penalty per
+line:
+
+```txt
+haunted doll -100
+Zenny -50
+```
+
+`100`, `+100`, and `-100` are all treated as a 100 MMR penalty for that mogi. The player name must
+match someone in the submitted table. The penalties are sent to the website during approval and are
+included in the saved MMR results.
 
 ## Manual MMR adjustments
 

@@ -54,6 +54,9 @@ const SUBMIT_MODAL_PREFIX = "submit_mogi_modal:";
 const APPROVE_PREFIX = "approve_mogi:";
 const REJECT_PREFIX = "reject_mogi:";
 const REJECT_MODAL_PREFIX = "reject_mogi_modal:";
+const PENALTY_PREFIX = "penalty_mogi:";
+const PENALTY_MODAL_PREFIX = "penalty_mogi_modal:";
+const PENALTIES_FIELD_NAME = "Penalties";
 
 type Ladder = "RR" | "CT" | "TT";
 
@@ -105,6 +108,11 @@ type ApproveResponse = {
   rankChanges?: RankChange[];
   tableImageBase64?: string;
   tier?: string | null;
+};
+
+type MogiPenalty = {
+  name: string;
+  penalty: number;
 };
 
 type AdjustmentResponse = {
@@ -191,6 +199,52 @@ function parseSignedAmount(value: string | null | undefined): number | null {
 
 function signedAmountLabel(amount: number): string {
   return `${amount > 0 ? "+" : ""}${amount}`;
+}
+
+function parsePenaltyText(value: string | null | undefined): { penalties: MogiPenalty[] } | { error: string } {
+  const raw = value?.trim() ?? "";
+  if (!raw || raw === "-") return { penalties: [] };
+
+  const penaltiesByName = new Map<string, MogiPenalty>();
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const match = line.match(/^(.+?)(?:\s*[:=,]\s*|\s+)([+-]?\d+)$/);
+    if (!match) {
+      return {
+        error: `Couldn't read penalty line "${line}". Use one per line, like: haunted doll -100`,
+      };
+    }
+
+    const name = match[1]?.trim();
+    const amount = parseSignedAmount(match[2]);
+    if (!name) return { error: "Each penalty needs a player name." };
+    if (!amount) {
+      return { error: `Penalty for "${name}" must look like 100 or -100, and cannot be 0.` };
+    }
+
+    const key = compactName(name) || name.toLowerCase();
+    const existing = penaltiesByName.get(key);
+    if (existing) {
+      existing.penalty += Math.abs(amount);
+    } else {
+      penaltiesByName.set(key, { name, penalty: Math.abs(amount) });
+    }
+  }
+
+  return { penalties: Array.from(penaltiesByName.values()) };
+}
+
+function formatPenalties(penalties: MogiPenalty[]): string {
+  if (penalties.length === 0) return "-";
+  return penalties.map((penalty) => `${penalty.name} -${penalty.penalty}`).join("\n");
+}
+
+function penaltyFieldValue(interaction: ButtonInteraction): string {
+  return embedField(interaction, PENALTIES_FIELD_NAME);
 }
 
 function encodeCustomIdPart(value: string): string {
@@ -583,6 +637,13 @@ async function deleteStaffReviewMessage(client: Client, messageId: string | null
   await channel.messages.delete(messageId).catch(() => {});
 }
 
+async function fetchStaffReviewMessage(client: Client, messageId: string | null | undefined) {
+  if (!messageId) return null;
+  const channel = await client.channels.fetch(staffChannelId).catch(() => null);
+  if (!channel?.isTextBased() || !("messages" in channel)) return null;
+  return channel.messages.fetch(messageId).catch(() => null);
+}
+
 async function registerCommands(client: Client): Promise<void> {
   const submitCommand = new SlashCommandBuilder()
     .setName(SUBMIT_COMMAND_NAME)
@@ -695,6 +756,12 @@ function reviewButtons(submissionId: string, disabled = false) {
         .setStyle(ButtonStyle.Success)
         .setDisabled(disabled),
       new ButtonBuilder()
+        .setCustomId(`${PENALTY_PREFIX}${submissionId}`)
+        .setLabel("Add penalty")
+        .setEmoji("\u26A0\uFE0F")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(disabled),
+      new ButtonBuilder()
         .setCustomId(`${REJECT_PREFIX}${submissionId}`)
         .setLabel("Reject")
         .setEmoji("\u274C")
@@ -709,6 +776,32 @@ function embedField(interaction: ButtonInteraction, name: string): string {
     (candidate) => candidate.name.toLowerCase() === name.toLowerCase()
   );
   return field?.value ?? "";
+}
+
+function embedWithUpdatedField(
+  originalEmbed: ButtonInteraction["message"]["embeds"][number],
+  name: string,
+  value: string,
+  inline = false
+): EmbedBuilder {
+  const embed = EmbedBuilder.from(originalEmbed.toJSON());
+  const fields = originalEmbed.fields.map((field) => ({
+    name: field.name,
+    value: field.value,
+    inline: field.inline,
+  }));
+  const existingIndex = fields.findIndex(
+    (field) => field.name.toLowerCase() === name.toLowerCase()
+  );
+
+  if (existingIndex >= 0) {
+    fields[existingIndex] = { name, value, inline };
+  } else {
+    fields.push({ name, value, inline });
+  }
+
+  embed.setFields(fields);
+  return embed;
 }
 
 function parseSubmitModalCustomId(customId: string): { ladder: Ladder; tier: string } {
@@ -772,7 +865,8 @@ async function handleSubmitModal(
       { name: "Tier", value: tierLabel, inline: true },
       { name: "Races Played", value: String(submission.raceCount ?? raceCount), inline: true },
       { name: "Submitted by", value: `<@${interaction.user.id}>`, inline: true },
-      { name: "Posts to", value: `<#${destinationId}>`, inline: true }
+      { name: "Posts to", value: `<#${destinationId}>`, inline: true },
+      { name: PENALTIES_FIELD_NAME, value: "-", inline: false }
     )
     .setImage("attachment://mogi-table.png")
     .setTimestamp();
@@ -871,6 +965,81 @@ async function handleAdjustmentCommand(interaction: ChatInputCommandInteraction)
   });
 }
 
+async function handlePenaltyButton(interaction: ButtonInteraction, submissionId: string): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({ content: "You do not have permission to add mogi penalties.", ephemeral: true });
+    return;
+  }
+
+  const currentPenalties = penaltyFieldValue(interaction);
+  const penaltiesInput = new TextInputBuilder()
+    .setCustomId("penalties")
+    .setLabel("Penalties, one per line")
+    .setPlaceholder("haunted doll -100\nZenny -50")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(1000);
+
+  if (currentPenalties && currentPenalties !== "-") {
+    penaltiesInput.setValue(currentPenalties);
+  }
+
+  await interaction.showModal(
+    new ModalBuilder()
+      .setCustomId(`${PENALTY_MODAL_PREFIX}${submissionId}:${interaction.message.id}`)
+      .setTitle("Add mogi penalties")
+      .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(penaltiesInput))
+  );
+}
+
+function parsePenaltyModalCustomId(customId: string): { submissionId: string; messageId: string } {
+  const [submissionId = "", messageId = ""] = customId.slice(PENALTY_MODAL_PREFIX.length).split(":");
+  return { submissionId, messageId };
+}
+
+async function handlePenaltyModal(
+  interaction: ModalSubmitInteraction,
+  submissionId: string,
+  messageId: string
+): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({ content: "You do not have permission to add mogi penalties.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const parsed = parsePenaltyText(interaction.fields.getTextInputValue("penalties"));
+  if ("error" in parsed) {
+    await interaction.editReply(parsed.error);
+    return;
+  }
+
+  const message = await fetchStaffReviewMessage(interaction.client, messageId);
+  const embed = message?.embeds[0];
+  if (!message || !embed) {
+    await interaction.editReply("I couldn't find the pending submission message to update.");
+    return;
+  }
+
+  await message.edit({
+    embeds: [
+      embedWithUpdatedField(
+        embed,
+        PENALTIES_FIELD_NAME,
+        formatPenalties(parsed.penalties),
+        false
+      ),
+    ],
+    components: reviewButtons(submissionId),
+  });
+
+  await interaction.editReply(
+    parsed.penalties.length
+      ? `Saved ${parsed.penalties.length} penalty${parsed.penalties.length === 1 ? "" : "ies"}.`
+      : "Penalties cleared."
+  );
+}
+
 async function handleApprove(interaction: ButtonInteraction, submissionId: string): Promise<void> {
   if (!hasStaffPermission(interaction)) {
     await interaction.reply({ content: "You do not have permission to approve mogis.", ephemeral: true });
@@ -880,10 +1049,17 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
   const ladder = normalizeLadder(embedField(interaction, "Ladder"));
   const tier = embedField(interaction, "Tier") || "All";
   const destinationId = resultChannelIdFor(ladder, tier);
+  const parsedPenalties = parsePenaltyText(penaltyFieldValue(interaction));
+  if ("error" in parsedPenalties) {
+    await interaction.reply({ content: parsedPenalties.error, ephemeral: true });
+    return;
+  }
+  const penalties = parsedPenalties.penalties;
 
   await interaction.deferReply({ ephemeral: true });
   const result = await apiPost<ApproveResponse>(`/api/discord/submissions/${submissionId}/approve`, {
     approvedByDiscordId: interaction.user.id,
+    penalties,
   });
 
   if (!result.mogiId || !result.mogiUrl || !result.tableImageBase64 || !result.mmrImageBase64) {
@@ -899,17 +1075,21 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
   const mmrImage = new AttachmentBuilder(Buffer.from(result.mmrImageBase64, "base64"), {
     name: "mmr-table.png",
   });
+  const resultFields = [
+    { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
+    { name: "Tier", value: approvedTier, inline: true },
+    { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
+    { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
+    { name: "View on website", value: `[Message](${mogiUrl})`, inline: true },
+  ];
+  if (penalties.length > 0) {
+    resultFields.push({ name: PENALTIES_FIELD_NAME, value: formatPenalties(penalties), inline: false });
+  }
   const resultEmbed = new EmbedBuilder()
     .setAuthor({ name: "Updater Automation" })
     .setTitle("Result Table")
     .setColor(0xed4245)
-    .addFields(
-      { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
-      { name: "Tier", value: approvedTier, inline: true },
-      { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
-      { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
-      { name: "View on website", value: `[Message](${mogiUrl})`, inline: true }
-    )
+    .addFields(resultFields)
     .setImage("attachment://result-table.png")
     .setTimestamp();
 
@@ -1064,6 +1244,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith(PENALTY_PREFIX)) {
+      await handlePenaltyButton(interaction, interaction.customId.slice(PENALTY_PREFIX.length));
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith(REJECT_PREFIX)) {
       await handleRejectButton(interaction, interaction.customId.slice(REJECT_PREFIX.length));
       return;
@@ -1072,6 +1257,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith(REJECT_MODAL_PREFIX)) {
       const { submissionId, messageId, eventId } = parseRejectModalCustomId(interaction.customId);
       await handleRejectModal(interaction, submissionId, messageId, eventId);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(PENALTY_MODAL_PREFIX)) {
+      const { submissionId, messageId } = parsePenaltyModalCustomId(interaction.customId);
+      await handlePenaltyModal(interaction, submissionId, messageId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Something went wrong.";
