@@ -41,6 +41,9 @@ const resultChannelIds = {
   rtAll: process.env.DISCORD_RESULTS_RT_ALL_CHANNEL_ID,
   rtTier1: process.env.DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID,
   rtTier2: process.env.DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID,
+  rtAll32: process.env.DISCORD_RESULTS_RT_ALL_32_TRACKS_CHANNEL_ID,
+  rtLegend: process.env.DISCORD_RESULTS_RT_LEGEND_CHANNEL_ID,
+  rtMaster: process.env.DISCORD_RESULTS_RT_MASTER_CHANNEL_ID,
   ctAll: process.env.DISCORD_RESULTS_CT_ALL_CHANNEL_ID,
   ttAll: process.env.DISCORD_RESULTS_TT_ALL_CHANNEL_ID,
 };
@@ -480,8 +483,11 @@ async function buildRankChangeNotice(
   };
 }
 
-function normalizeTierKey(tier: string | null | undefined): "all" | "1" | "2" {
+function normalizeTierKey(tier: string | null | undefined): "all" | "1" | "2" | "all32" | "legend" | "master" {
   const normalized = (tier || "").toLowerCase().trim();
+  if (/32/.test(normalized)) return "all32";
+  if (/\blegend\b/.test(normalized)) return "legend";
+  if (/\bmaster\b/.test(normalized)) return "master";
   if (!normalized || /\ball\b/.test(normalized)) return "all";
   if (/(^|\D)1(\D|$)|\bt1\b|\btier\s*1\b/.test(normalized)) return "1";
   if (/(^|\D)2(\D|$)|\bt2\b|\btier\s*2\b/.test(normalized)) return "2";
@@ -501,6 +507,9 @@ function resultChannelIdFor(ladder: Ladder, tier: string | null | undefined): st
 
   if (tierKey === "1") return resultChannelIds.rtTier1 || resultChannelIds.rtAll || resultChannelIds.fallback;
   if (tierKey === "2") return resultChannelIds.rtTier2 || resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "all32") return resultChannelIds.rtAll32 || resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "legend") return resultChannelIds.rtLegend || resultChannelIds.rtAll || resultChannelIds.fallback;
+  if (tierKey === "master") return resultChannelIds.rtMaster || resultChannelIds.rtAll || resultChannelIds.fallback;
   return resultChannelIds.rtAll || resultChannelIds.fallback;
 }
 

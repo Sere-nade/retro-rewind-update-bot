@@ -28,6 +28,9 @@ DISCORD_RESULTS_CHANNEL_ID="public fallback results channel id"
 DISCORD_RESULTS_RT_ALL_CHANNEL_ID="rt tier all channel id"
 DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID="rt tier 1 channel id"
 DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID="rt tier 2 channel id"
+DISCORD_RESULTS_RT_ALL_32_TRACKS_CHANNEL_ID="rt all tier 32-tracks channel id"
+DISCORD_RESULTS_RT_LEGEND_CHANNEL_ID="rt legend tier channel id"
+DISCORD_RESULTS_RT_MASTER_CHANNEL_ID="rt master tier channel id"
 
 # CT result channels
 DISCORD_RESULTS_CT_ALL_CHANNEL_ID="ct all tier channel id"
@@ -66,7 +69,9 @@ After staff approves the submission, the bot posts the table/result message to t
 - `RT` + blank/All/unknown tier -> `DISCORD_RESULTS_RT_ALL_CHANNEL_ID`
 - `RT` + Tier 1 -> `DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID`
 - `RT` + Tier 2 -> `DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID`
-- `RT` + All Tier 32-Tracks / Legend Tier / Master Tier -> `DISCORD_RESULTS_RT_ALL_CHANNEL_ID`
+- `RT` + All Tier 32-Tracks -> `DISCORD_RESULTS_RT_ALL_32_TRACKS_CHANNEL_ID`
+- `RT` + Legend Tier -> `DISCORD_RESULTS_RT_LEGEND_CHANNEL_ID`
+- `RT` + Master Tier -> `DISCORD_RESULTS_RT_MASTER_CHANNEL_ID`
 - `CT` + blank/All/unknown tier -> `DISCORD_RESULTS_CT_ALL_CHANNEL_ID`
 - `TT` + All Tier -> `DISCORD_RESULTS_TT_ALL_CHANNEL_ID`
 
