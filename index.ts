@@ -10,6 +10,7 @@ import {
   Events,
   GatewayIntentBits,
   type ChatInputCommandInteraction,
+  type AutocompleteInteraction,
   ModalBuilder,
   RESTJSONErrorCodes,
   SlashCommandBuilder,
@@ -40,26 +41,37 @@ const resultChannelIds = {
   rtAll: process.env.DISCORD_RESULTS_RT_ALL_CHANNEL_ID,
   rtTier1: process.env.DISCORD_RESULTS_RT_TIER_1_CHANNEL_ID,
   rtTier2: process.env.DISCORD_RESULTS_RT_TIER_2_CHANNEL_ID,
-  rtTier3: process.env.DISCORD_RESULTS_RT_TIER_3_CHANNEL_ID,
   ctAll: process.env.DISCORD_RESULTS_CT_ALL_CHANNEL_ID,
-  ctTier1: process.env.DISCORD_RESULTS_CT_TIER_1_CHANNEL_ID,
-  ctTier2: process.env.DISCORD_RESULTS_CT_TIER_2_CHANNEL_ID,
+  ttAll: process.env.DISCORD_RESULTS_TT_ALL_CHANNEL_ID,
 };
 
 const SUBMIT_COMMAND_NAME = "submit_mogi";
+const ADJUST_COMMAND_NAME = "adjust_mmr";
 const SUBMIT_MODAL_PREFIX = "submit_mogi_modal:";
 const APPROVE_PREFIX = "approve_mogi:";
 const REJECT_PREFIX = "reject_mogi:";
 const REJECT_MODAL_PREFIX = "reject_mogi_modal:";
 
-type Ladder = "RT" | "CT";
+type Ladder = "RT" | "CT" | "TT";
 
-const TIER_CHOICES = [
-  { name: "All", value: "All" },
+type TierChoice = { name: string; value: string };
+
+const RT_TIER_CHOICES = [
+  { name: "All Tier", value: "All Tier" },
   { name: "Tier 1", value: "Tier 1" },
   { name: "Tier 2", value: "Tier 2" },
-  { name: "Tier 3", value: "Tier 3" },
-] as const;
+  { name: "All Tier 32-Tracks", value: "All Tier 32-Tracks" },
+  { name: "Legend Tier", value: "Legend Tier" },
+  { name: "Master Tier", value: "Master Tier" },
+] as const satisfies readonly TierChoice[];
+
+const CT_TIER_CHOICES = [
+  { name: "All Tier", value: "All Tier" },
+] as const satisfies readonly TierChoice[];
+
+const TT_TIER_CHOICES = [
+  { name: "All Tier", value: "All Tier" },
+] as const satisfies readonly TierChoice[];
 
 type SubmissionResponse = {
   error?: string;
@@ -92,6 +104,18 @@ type ApproveResponse = {
   tier?: string | null;
 };
 
+type AdjustmentResponse = {
+  adjustmentId?: string;
+  amount?: number;
+  error?: string;
+  mmrAfter?: number;
+  mmrBefore?: number;
+  playerName?: string;
+  playerUrl?: string;
+  seasonCategory?: string;
+  seasonName?: string;
+};
+
 type SendableTextChannel = TextBasedChannel & {
   send(options: string | MessageCreateOptions): Promise<unknown>;
 };
@@ -99,6 +123,7 @@ type SendableTextChannel = TextBasedChannel & {
 const rankRoleMaps: Record<Ladder, Map<string, string>> = {
   RT: parseRankRoleMap(process.env.DISCORD_RT_RANK_ROLES),
   CT: parseRankRoleMap(process.env.DISCORD_CT_RANK_ROLES),
+  TT: parseRankRoleMap(process.env.DISCORD_TT_RANK_ROLES),
 };
 
 function mustGetEnv(name: string): string {
@@ -108,7 +133,10 @@ function mustGetEnv(name: string): string {
 }
 
 function normalizeLadder(value: string | null | undefined): Ladder {
-  return value?.toUpperCase() === "CT" ? "CT" : "RT";
+  const normalized = value?.toUpperCase();
+  if (normalized === "CT") return "CT";
+  if (normalized === "TT") return "TT";
+  return "RT";
 }
 
 function parseOptionalInteger(value: string, fallback: number | null): number | null {
@@ -127,7 +155,39 @@ function formatLabel(format?: string): string {
 
 function displayTier(tier: string | null | undefined): string {
   const trimmed = tier?.trim();
-  return trimmed || "All";
+  return trimmed || "All Tier";
+}
+
+function tierChoicesForLadder(ladder: Ladder): readonly TierChoice[] {
+  if (ladder === "CT") return CT_TIER_CHOICES;
+  if (ladder === "TT") return TT_TIER_CHOICES;
+  return RT_TIER_CHOICES;
+}
+
+function tierMatchesChoice(ladder: Ladder, tier: string): boolean {
+  const normalized = tier.toLowerCase().trim();
+  return tierChoicesForLadder(ladder).some(
+    (choice) => choice.value.toLowerCase() === normalized
+  );
+}
+
+function tierChoicesForAutocomplete(ladder: Ladder, query: string): TierChoice[] {
+  const normalizedQuery = query.toLowerCase().trim();
+  return tierChoicesForLadder(ladder)
+    .filter((choice) => choice.name.toLowerCase().includes(normalizedQuery))
+    .slice(0, 25);
+}
+
+function parseSignedAmount(value: string | null | undefined): number | null {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[+-]?\d+$/.test(trimmed)) return null;
+  const amount = Number(trimmed);
+  if (!Number.isSafeInteger(amount) || amount === 0 || Math.abs(amount) > 100000) return null;
+  return amount;
+}
+
+function signedAmountLabel(amount: number): string {
+  return `${amount > 0 ? "+" : ""}${amount}`;
 }
 
 function encodeCustomIdPart(value: string): string {
@@ -420,31 +480,33 @@ async function buildRankChangeNotice(
   };
 }
 
-function normalizeTierKey(tier: string | null | undefined): "all" | "1" | "2" | "3" {
+function normalizeTierKey(tier: string | null | undefined): "all" | "1" | "2" {
   const normalized = (tier || "").toLowerCase().trim();
   if (!normalized || /\ball\b/.test(normalized)) return "all";
   if (/(^|\D)1(\D|$)|\bt1\b|\btier\s*1\b/.test(normalized)) return "1";
   if (/(^|\D)2(\D|$)|\bt2\b|\btier\s*2\b/.test(normalized)) return "2";
-  if (/(^|\D)3(\D|$)|\bt3\b|\btier\s*3\b/.test(normalized)) return "3";
   return "all";
 }
 
 function resultChannelIdFor(ladder: Ladder, tier: string | null | undefined): string {
   const tierKey = normalizeTierKey(tier);
 
+  if (ladder === "TT") {
+    return resultChannelIds.ttAll || resultChannelIds.fallback;
+  }
+
   if (ladder === "CT") {
-    if (tierKey === "1") return resultChannelIds.ctTier1 || resultChannelIds.ctAll || resultChannelIds.fallback;
-    if (tierKey === "2") return resultChannelIds.ctTier2 || resultChannelIds.ctAll || resultChannelIds.fallback;
     return resultChannelIds.ctAll || resultChannelIds.fallback;
   }
 
   if (tierKey === "1") return resultChannelIds.rtTier1 || resultChannelIds.rtAll || resultChannelIds.fallback;
   if (tierKey === "2") return resultChannelIds.rtTier2 || resultChannelIds.rtAll || resultChannelIds.fallback;
-  if (tierKey === "3") return resultChannelIds.rtTier3 || resultChannelIds.rtAll || resultChannelIds.fallback;
   return resultChannelIds.rtAll || resultChannelIds.fallback;
 }
 
-function hasStaffPermission(interaction: ButtonInteraction | ModalSubmitInteraction): boolean {
+function hasStaffPermission(
+  interaction: ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction
+): boolean {
   if (!staffRoleId) return true;
   const member = interaction.member as GuildMember | null;
   return Boolean(member?.roles.cache.has(staffRoleId));
@@ -475,6 +537,28 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return data;
 }
 
+async function apiGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}${path}`);
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(data.error || `API request failed (${response.status}).`);
+  }
+  return data;
+}
+
+async function playerAutocompleteChoices(query: string): Promise<TierChoice[]> {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  const data = await apiGet<{ players?: { id: string; name: string }[] }>(
+    `/api/stats/players${params.size ? `?${params}` : ""}`
+  );
+
+  return (data.players ?? []).slice(0, 25).map((player) => ({
+    name: player.name.slice(0, 100),
+    value: player.name.slice(0, 100),
+  }));
+}
+
 async function getTextChannel(client: Client, channelId: string): Promise<SendableTextChannel> {
   const channel = await client.channels.fetch(channelId);
   if (!channel?.isTextBased() || !("send" in channel)) {
@@ -491,7 +575,7 @@ async function deleteStaffReviewMessage(client: Client, messageId: string | null
 }
 
 async function registerCommands(client: Client): Promise<void> {
-  const command = new SlashCommandBuilder()
+  const submitCommand = new SlashCommandBuilder()
     .setName(SUBMIT_COMMAND_NAME)
     .setDescription("Submit a mogi table for updater approval")
     .addStringOption((option) =>
@@ -499,26 +583,56 @@ async function registerCommands(client: Client): Promise<void> {
         .setName("ladder")
         .setDescription("Which ladder this table belongs to")
         .setRequired(true)
-        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" })
+        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
     )
     .addStringOption((option) =>
       option
         .setName("tier")
         .setDescription("Which tier this mogi belongs to")
         .setRequired(true)
-        .addChoices(...TIER_CHOICES)
+        .setAutocomplete(true)
     );
+  const adjustCommand = new SlashCommandBuilder()
+    .setName(ADJUST_COMMAND_NAME)
+    .setDescription("Give a player a manual MMR penalty or adjustment")
+    .addStringOption((option) =>
+      option
+        .setName("ladder")
+        .setDescription("Which ladder to adjust")
+        .setRequired(true)
+        .addChoices({ name: "RT", value: "RT" }, { name: "CT", value: "CT" }, { name: "TT", value: "TT" })
+    )
+    .addStringOption((option) =>
+      option
+        .setName("player")
+        .setDescription("Leaderboard player name")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("amount")
+        .setDescription("Use +100 for an adjustment or -100 for a penalty")
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("reason")
+        .setDescription("Optional reason shown on the player page")
+        .setRequired(false)
+    );
+  const commands = [submitCommand, adjustCommand];
 
   if (guildId) {
     const guild = await client.guilds.fetch(guildId);
-    await guild.commands.set([command]);
-    console.log(`Registered /${SUBMIT_COMMAND_NAME} in guild ${guildId}`);
+    await guild.commands.set(commands);
+    console.log(`Registered updater commands in guild ${guildId}`);
     return;
   }
 
   if (!client.application) throw new Error("Discord application is not ready.");
-  await client.application.commands.set([command]);
-  console.log(`Registered global /${SUBMIT_COMMAND_NAME}`);
+  await client.application.commands.set(commands);
+  console.log("Registered global updater commands");
 }
 
 function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
@@ -662,6 +776,90 @@ async function handleSubmitModal(
   });
 
   await interaction.editReply("Submitted for updater review.");
+}
+
+async function handleAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
+  const focused = interaction.options.getFocused(true);
+
+  if (interaction.commandName === SUBMIT_COMMAND_NAME && focused.name === "tier") {
+    const ladder = normalizeLadder(interaction.options.getString("ladder"));
+    await interaction.respond(
+      tierChoicesForAutocomplete(ladder, String(focused.value)).map((choice) => ({
+        name: choice.name,
+        value: choice.value,
+      }))
+    );
+    return;
+  }
+
+  if (interaction.commandName === ADJUST_COMMAND_NAME && focused.name === "player") {
+    try {
+      await interaction.respond(await playerAutocompleteChoices(String(focused.value)));
+    } catch (error) {
+      console.error("Player autocomplete failed", error);
+      await interaction.respond([]);
+    }
+  }
+}
+
+async function handleAdjustmentCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({
+      content: "You do not have permission to adjust MMR.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const ladder = normalizeLadder(interaction.options.getString("ladder"));
+  const playerName = interaction.options.getString("player", true).trim();
+  const amountText = interaction.options.getString("amount", true);
+  const amount = parseSignedAmount(amountText);
+  const reason = interaction.options.getString("reason")?.trim() || undefined;
+
+  if (!amount) {
+    await interaction.reply({
+      content: "Amount must look like `+100` or `-100` and cannot be 0.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const result = await apiPost<AdjustmentResponse>("/api/discord/adjustments", {
+    adjustedByDiscordId: interaction.user.id,
+    amount,
+    category: ladder,
+    playerName,
+    reason,
+  });
+
+  if (!result.playerName || result.mmrBefore == null || result.mmrAfter == null) {
+    throw new Error(result.error || "Adjustment API did not return the updated MMR.");
+  }
+
+  const amountLabel = signedAmountLabel(amount);
+  const playerLink = result.playerUrl
+    ? `[${result.playerName}](${publicUrl(result.playerUrl)})`
+    : result.playerName;
+  const summary = `${ladder} ${amountLabel} adjustment added for ${playerLink}: ${result.mmrBefore} → ${result.mmrAfter}`;
+
+  await interaction.editReply(summary);
+
+  const staffChannel = await getTextChannel(interaction.client, staffChannelId);
+  await staffChannel.send({
+    content: [
+      `Manual ${ladder} MMR ${amount > 0 ? "adjustment" : "penalty"} added.`,
+      `Player: ${playerLink}`,
+      `Amount: ${amountLabel}`,
+      `MMR: ${result.mmrBefore} → ${result.mmrAfter}`,
+      `Updated by: <@${interaction.user.id}>`,
+      reason ? `Reason: ${reason}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    allowedMentions: { users: [interaction.user.id] },
+  });
 }
 
 async function handleApprove(interaction: ButtonInteraction, submissionId: string): Promise<void> {
@@ -811,6 +1009,11 @@ client.once(Events.ClientReady, async (readyClient) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    if (interaction.isAutocomplete()) {
+      await handleAutocomplete(interaction);
+      return;
+    }
+
     if (interaction.isChatInputCommand() && interaction.commandName === SUBMIT_COMMAND_NAME) {
       if (!hasSubmitPermission(interaction)) {
         await interaction.reply({
@@ -822,15 +1025,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const ladder = normalizeLadder(interaction.options.getString("ladder"));
       const tier = displayTier(interaction.options.getString("tier"));
-      if (ladder === "CT" && normalizeTierKey(tier) === "3") {
+      if (!tierMatchesChoice(ladder, tier)) {
         await interaction.reply({
-          content: "CT only supports All, Tier 1, or Tier 2 right now.",
+          content: `${ladder} only supports: ${tierChoicesForLadder(ladder)
+            .map((choice) => choice.name)
+            .join(", ")}.`,
           ephemeral: true,
         });
         return;
       }
 
       await interaction.showModal(buildSubmitModal(ladder, tier));
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === ADJUST_COMMAND_NAME) {
+      await handleAdjustmentCommand(interaction);
       return;
     }
 
