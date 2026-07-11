@@ -63,20 +63,20 @@ type Ladder = "RR" | "CT" | "TT";
 type TierChoice = { name: string; value: string };
 
 const RR_TIER_CHOICES = [
-  { name: "All Tier", value: "All Tier" },
-  { name: "Tier 1", value: "Tier 1" },
-  { name: "Tier 2", value: "Tier 2" },
-  { name: "All Tier 32-Tracks", value: "All Tier 32-Tracks" },
-  { name: "Legend Tier", value: "Legend Tier" },
-  { name: "Master Tier", value: "Master Tier" },
+  { name: "All", value: "All" },
+  { name: "1", value: "1" },
+  { name: "2", value: "2" },
+  { name: "All 32-Tracks", value: "All 32-Tracks" },
+  { name: "Legend", value: "Legend" },
+  { name: "Master", value: "Master" },
 ] as const satisfies readonly TierChoice[];
 
 const CT_TIER_CHOICES = [
-  { name: "All Tier", value: "All Tier" },
+  { name: "All", value: "All" },
 ] as const satisfies readonly TierChoice[];
 
 const TT_TIER_CHOICES = [
-  { name: "All Tier", value: "All Tier" },
+  { name: "All", value: "All" },
 ] as const satisfies readonly TierChoice[];
 
 type SubmissionResponse = {
@@ -165,8 +165,9 @@ function formatLabel(format?: string): string {
 }
 
 function displayTier(tier: string | null | undefined): string {
-  const trimmed = tier?.trim();
-  return trimmed || "All Tier";
+  const trimmed = tier?.trim() || "All";
+  const withoutRepeatedLabel = trimmed.replace(/\btier\b/gi, " ").replace(/\s+/g, " ").trim();
+  return withoutRepeatedLabel || "All";
 }
 
 function tierChoicesForLadder(ladder: Ladder): readonly TierChoice[] {
