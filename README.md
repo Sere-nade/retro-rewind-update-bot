@@ -31,6 +31,7 @@ DISCORD_RESULTS_RR_TIER_2_CHANNEL_ID="rr tier 2 channel id"
 DISCORD_RESULTS_RR_ALL_32_TRACKS_CHANNEL_ID="rr all tier 32-tracks channel id"
 DISCORD_RESULTS_RR_LEGEND_CHANNEL_ID="rr legend tier channel id"
 DISCORD_RESULTS_RR_MASTER_CHANNEL_ID="rr master tier channel id"
+DISCORD_RESULTS_RR_SQ_CHANNEL_ID="rr squad queue channel id"
 
 # CT result channels
 DISCORD_RESULTS_CT_ALL_CHANNEL_ID="ct all tier channel id"
@@ -72,7 +73,7 @@ After staff approves the submission, the bot posts the table/result message to t
 - `RR` + All 32-Tracks -> `DISCORD_RESULTS_RR_ALL_32_TRACKS_CHANNEL_ID`
 - `RR` + Legend -> `DISCORD_RESULTS_RR_LEGEND_CHANNEL_ID`
 - `RR` + Master -> `DISCORD_RESULTS_RR_MASTER_CHANNEL_ID`
-- `RR` + Squad Queue -> `DISCORD_RESULTS_RR_ALL_CHANNEL_ID`
+- `RR` + Squad Queue -> `DISCORD_RESULTS_RR_SQ_CHANNEL_ID`
 - `CT` + blank/All/unknown tier -> `DISCORD_RESULTS_CT_ALL_CHANNEL_ID`
 - `TT` + All -> `DISCORD_RESULTS_TT_ALL_CHANNEL_ID`
 
