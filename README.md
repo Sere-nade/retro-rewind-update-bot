@@ -72,6 +72,7 @@ After staff approves the submission, the bot posts the table/result message to t
 - `RR` + All 32-Tracks -> `DISCORD_RESULTS_RR_ALL_32_TRACKS_CHANNEL_ID`
 - `RR` + Legend -> `DISCORD_RESULTS_RR_LEGEND_CHANNEL_ID`
 - `RR` + Master -> `DISCORD_RESULTS_RR_MASTER_CHANNEL_ID`
+- `RR` + Squad Queue -> `DISCORD_RESULTS_RR_ALL_CHANNEL_ID`
 - `CT` + blank/All/unknown tier -> `DISCORD_RESULTS_CT_ALL_CHANNEL_ID`
 - `TT` + All -> `DISCORD_RESULTS_TT_ALL_CHANNEL_ID`
 

@@ -69,6 +69,7 @@ const RR_TIER_CHOICES = [
   { name: "All 32-Tracks", value: "All 32-Tracks" },
   { name: "Legend", value: "Legend" },
   { name: "Master", value: "Master" },
+  { name: "Squad Queue", value: "Squad Queue" },
 ] as const satisfies readonly TierChoice[];
 
 const CT_TIER_CHOICES = [
@@ -84,6 +85,7 @@ type SubmissionResponse = {
   eventNumber?: number;
   format?: string;
   raceCount?: number;
+  roomNumber?: number | null;
   submissionId?: string;
   tableImageBase64?: string;
   tier?: string | null;
@@ -105,6 +107,7 @@ type ApproveResponse = {
   mogiId?: string;
   mogiUrl?: string;
   raceCount?: number;
+  roomNumber?: number | null;
   rankChanges?: RankChange[];
   tableImageBase64?: string;
   tier?: string | null;
@@ -200,6 +203,10 @@ function parseSignedAmount(value: string | null | undefined): number | null {
 
 function signedAmountLabel(amount: number): string {
   return `${amount > 0 ? "+" : ""}${amount}`;
+}
+
+function roomLabel(roomNumber: number | null | undefined): string {
+  return Number.isInteger(roomNumber) ? `Room ${roomNumber}` : "-";
 }
 
 function parsePenaltyText(value: string | null | undefined): { penalties: MogiPenalty[] } | { error: string } {
@@ -829,8 +836,12 @@ async function handleSubmitModal(
     await interaction.editReply("Race count must be a number between 1 and 99.");
     return;
   }
-  if (Number.isNaN(roomNumber)) {
-    await interaction.editReply("Room number must be blank or a whole number.");
+  if (Number.isNaN(roomNumber) || (roomNumber != null && (roomNumber < 1 || roomNumber > 99))) {
+    await interaction.editReply("Room number must be blank or a whole number between 1 and 99.");
+    return;
+  }
+  if (tier.toLowerCase() === "squad queue" && roomNumber == null) {
+    await interaction.editReply("Squad Queue submissions need a room number.");
     return;
   }
 
@@ -864,6 +875,7 @@ async function handleSubmitModal(
       { name: "Submission ID", value: eventId, inline: true },
       { name: "Ladder", value: ladder, inline: true },
       { name: "Tier", value: tierLabel, inline: true },
+      { name: "Room", value: roomLabel(submission.roomNumber ?? roomNumber), inline: true },
       { name: "Races Played", value: String(submission.raceCount ?? raceCount), inline: true },
       { name: "Submitted by", value: `<@${interaction.user.id}>`, inline: true },
       { name: "Posts to", value: `<#${destinationId}>`, inline: true },
@@ -1068,6 +1080,10 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
   }
 
   const approvedTier = displayTier(result.tier || tier);
+  const approvedRoom =
+    result.roomNumber == null
+      ? embedField(interaction, "Room") || "-"
+      : roomLabel(result.roomNumber);
   const approvedEventId = eventIdLabel(result.eventNumber ?? result.mogiId);
   const mogiUrl = publicUrl(result.mogiUrl);
   const tableImage = new AttachmentBuilder(Buffer.from(result.tableImageBase64, "base64"), {
@@ -1079,6 +1095,7 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
   const resultFields = [
     { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
     { name: "Tier", value: approvedTier, inline: true },
+    { name: "Room", value: approvedRoom, inline: true },
     { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
     { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
     { name: "View on website", value: `[Message](${mogiUrl})`, inline: true },
