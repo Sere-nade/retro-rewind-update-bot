@@ -89,6 +89,7 @@ type SubmissionResponse = {
   format?: string;
   raceCount?: number;
   mmrMultiplier?: number;
+  multiplyLosses?: boolean;
   roomNumber?: number | null;
   submissionId?: string;
   tableImageBase64?: string;
@@ -112,6 +113,7 @@ type ApproveResponse = {
   mogiUrl?: string;
   raceCount?: number;
   mmrMultiplier?: number;
+  multiplyLosses?: boolean;
   roomNumber?: number | null;
   rankChanges?: RankChange[];
   tableImageBase64?: string;
@@ -126,6 +128,7 @@ type MogiPenalty = {
 type MultiplierResponse = {
   error?: string;
   mmrMultiplier?: number;
+  multiplyLosses?: boolean;
 };
 
 type AdjustmentResponse = {
@@ -195,6 +198,27 @@ function formatMultiplier(value: number): string {
 
 function effectiveMultiplier(raceCount: number, mmrMultiplier: number): number {
   return (raceCount / 12) * mmrMultiplier;
+}
+
+function multiplierScopeLabel(multiplyLosses: boolean): string {
+  return multiplyLosses ? "Gains and losses" : "Gains only";
+}
+
+function effectiveMultiplierLabel(
+  raceCount: number,
+  mmrMultiplier: number,
+  multiplyLosses: boolean
+): string {
+  const gainMultiplier = formatMultiplier(effectiveMultiplier(raceCount, mmrMultiplier));
+  if (multiplyLosses) return `x${gainMultiplier}`;
+  return `Gains x${gainMultiplier} · losses x${formatMultiplier(raceCount / 12)}`;
+}
+
+function parseMultiplierScope(value: string): boolean | null {
+  const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  if (["both", "gains and losses", "gain and loss"].includes(normalized)) return true;
+  if (["gains", "gains only", "gain only"].includes(normalized)) return false;
+  return null;
 }
 
 function tierChoicesForLadder(ladder: Ladder): readonly TierChoice[] {
@@ -695,6 +719,16 @@ async function registerCommands(client: Client): Promise<void> {
         .setDescription("Which tier this mogi belongs to")
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName("multiplier_scope")
+        .setDescription("Apply the event multiplier to gains only or to gains and losses")
+        .setRequired(false)
+        .addChoices(
+          { name: "Gains and losses", value: "BOTH" },
+          { name: "Gains only", value: "GAINS_ONLY" }
+        )
     );
   const adjustCommand = new SlashCommandBuilder()
     .setName(ADJUST_COMMAND_NAME)
@@ -739,7 +773,7 @@ async function registerCommands(client: Client): Promise<void> {
   console.log("Registered global updater commands");
 }
 
-function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
+function buildSubmitModal(ladder: Ladder, tier: string, multiplyLosses: boolean): ModalBuilder {
   const tableText = new TextInputBuilder()
     .setCustomId("tableText")
     .setLabel("Final table text")
@@ -779,7 +813,11 @@ function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
     .setMaxLength(500);
 
   return new ModalBuilder()
-    .setCustomId(`${SUBMIT_MODAL_PREFIX}${ladder}:${encodeCustomIdPart(tier)}`)
+    .setCustomId(
+      `${SUBMIT_MODAL_PREFIX}${ladder}:${encodeCustomIdPart(tier)}:${
+        multiplyLosses ? "both" : "gains"
+      }`
+    )
     .setTitle(`Submit ${ladder} ${displayTier(tier)}`)
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(tableText),
@@ -854,18 +892,24 @@ function embedWithUpdatedField(
   return embed;
 }
 
-function parseSubmitModalCustomId(customId: string): { ladder: Ladder; tier: string } {
-  const [ladderValue, tierValue] = customId.slice(SUBMIT_MODAL_PREFIX.length).split(":");
+function parseSubmitModalCustomId(
+  customId: string
+): { ladder: Ladder; tier: string; multiplyLosses: boolean } {
+  const [ladderValue, tierValue, scopeValue] = customId
+    .slice(SUBMIT_MODAL_PREFIX.length)
+    .split(":");
   return {
     ladder: normalizeLadder(ladderValue),
     tier: displayTier(decodeCustomIdPart(tierValue)),
+    multiplyLosses: scopeValue !== "gains",
   };
 }
 
 async function handleSubmitModal(
   interaction: ModalSubmitInteraction,
   ladder: Ladder,
-  tier: string
+  tier: string,
+  multiplyLosses: boolean
 ): Promise<void> {
   await interaction.deferReply({ ephemeral: true });
 
@@ -902,6 +946,7 @@ async function handleSubmitModal(
     notes: [notes, `Discord ladder: ${ladder}`].filter(Boolean).join("\n"),
     raceCount,
     mmrMultiplier,
+    multiplyLosses,
     roomNumber,
     submittedByDiscordId: interaction.user.id,
     submittedFromChannelId: interaction.channelId,
@@ -934,13 +979,17 @@ async function handleSubmitModal(
         inline: true,
       },
       {
+        name: "Multiplier Applies To",
+        value: multiplierScopeLabel(submission.multiplyLosses ?? multiplyLosses),
+        inline: true,
+      },
+      {
         name: "Effective MMR Multiplier",
-        value: `x${formatMultiplier(
-          effectiveMultiplier(
-            submission.raceCount ?? raceCount,
-            submission.mmrMultiplier ?? mmrMultiplier
-          )
-        )}`,
+        value: effectiveMultiplierLabel(
+          submission.raceCount ?? raceCount,
+          submission.mmrMultiplier ?? mmrMultiplier,
+          submission.multiplyLosses ?? multiplyLosses
+        ),
         inline: true,
       },
       { name: "Submitted by", value: `<@${interaction.user.id}>`, inline: true },
@@ -1093,11 +1142,24 @@ async function handleMultiplierButton(
     .setRequired(true)
     .setMaxLength(5);
 
+  const currentScope = embedField(interaction, "Multiplier Applies To");
+  const scopeInput = new TextInputBuilder()
+    .setCustomId("multiplierScope")
+    .setLabel("Apply to: both or gains only")
+    .setPlaceholder("both or gains only")
+    .setValue(currentScope.toLowerCase().includes("only") ? "gains only" : "both")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(20);
+
   await interaction.showModal(
     new ModalBuilder()
       .setCustomId(`${MULTIPLIER_MODAL_PREFIX}${submissionId}:${interaction.message.id}`)
       .setTitle("Set MMR multiplier")
-      .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(multiplierInput))
+      .addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(multiplierInput),
+        new ActionRowBuilder<TextInputBuilder>().addComponents(scopeInput)
+      )
   );
 }
 
@@ -1134,16 +1196,27 @@ async function handleMultiplierModal(
     });
     return;
   }
+  const multiplyLosses = parseMultiplierScope(
+    interaction.fields.getTextInputValue("multiplierScope")
+  );
+  if (multiplyLosses == null) {
+    await interaction.reply({
+      content: 'Multiplier scope must be "both" or "gains only".',
+      ephemeral: true,
+    });
+    return;
+  }
 
   await interaction.deferReply({ ephemeral: true });
   const result = await apiPost<MultiplierResponse>(
     `/api/discord/submissions/${submissionId}/multiplier`,
-    { mmrMultiplier }
+    { mmrMultiplier, multiplyLosses }
   );
   const savedMultiplier = result.mmrMultiplier;
   if (savedMultiplier == null) {
     throw new Error(result.error || "Multiplier API did not return the saved value.");
   }
+  const savedMultiplyLosses = result.multiplyLosses ?? multiplyLosses;
 
   const message = await fetchStaffReviewMessage(interaction.client, messageId);
   const embed = message?.embeds[0];
@@ -1158,10 +1231,17 @@ async function handleMultiplierModal(
     if (field.name === "Event Multiplier") {
       return { name: field.name, value: `x${formatMultiplier(savedMultiplier)}`, inline: field.inline };
     }
+    if (field.name === "Multiplier Applies To") {
+      return {
+        name: field.name,
+        value: multiplierScopeLabel(savedMultiplyLosses),
+        inline: field.inline,
+      };
+    }
     if (field.name === "Effective MMR Multiplier") {
       return {
         name: field.name,
-        value: `x${formatMultiplier(effectiveMultiplier(raceCount, savedMultiplier))}`,
+        value: effectiveMultiplierLabel(raceCount, savedMultiplier, savedMultiplyLosses),
         inline: field.inline,
       };
     }
@@ -1172,7 +1252,11 @@ async function handleMultiplierModal(
     embeds: [EmbedBuilder.from(embed.toJSON()).setFields(fields)],
     components: reviewButtons(submissionId),
   });
-  await interaction.editReply(`Event multiplier set to x${formatMultiplier(savedMultiplier)}.`);
+  await interaction.editReply(
+    `Event multiplier set to x${formatMultiplier(savedMultiplier)} (${multiplierScopeLabel(
+      savedMultiplyLosses
+    ).toLowerCase()}).`
+  );
 }
 
 function parsePenaltyModalCustomId(customId: string): { submissionId: string; messageId: string } {
@@ -1273,11 +1357,20 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
       inline: true,
     },
     {
+      name: "Multiplier Applies To",
+      value: multiplierScopeLabel(result.multiplyLosses ?? true),
+      inline: true,
+    },
+    {
       name: "Effective MMR Multiplier",
       value:
         result.raceCount == null
           ? "-"
-          : `x${formatMultiplier(effectiveMultiplier(result.raceCount, result.mmrMultiplier ?? 1))}`,
+          : effectiveMultiplierLabel(
+              result.raceCount,
+              result.mmrMultiplier ?? 1,
+              result.multiplyLosses ?? true
+            ),
       inline: true,
     },
     { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
@@ -1303,6 +1396,11 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
       {
         name: "MMR Multiplier",
         value: `x${formatMultiplier(result.mmrMultiplier ?? 1)}`,
+        inline: true,
+      },
+      {
+        name: "Multiplier Applies To",
+        value: multiplierScopeLabel(result.multiplyLosses ?? true),
         inline: true,
       },
       { name: "Updated by", value: `<@${interaction.user.id}>`, inline: true }
@@ -1420,6 +1518,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const ladder = normalizeLadder(interaction.options.getString("ladder"));
       const tier = displayTier(interaction.options.getString("tier"));
+      const multiplyLosses =
+        interaction.options.getString("multiplier_scope") !== "GAINS_ONLY";
       if (!tierMatchesChoice(ladder, tier)) {
         await interaction.reply({
           content: `${ladder} only supports: ${tierChoicesForLadder(ladder)
@@ -1430,7 +1530,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      await interaction.showModal(buildSubmitModal(ladder, tier));
+      await interaction.showModal(buildSubmitModal(ladder, tier, multiplyLosses));
       return;
     }
 
@@ -1440,8 +1540,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isModalSubmit() && interaction.customId.startsWith(SUBMIT_MODAL_PREFIX)) {
-      const { ladder, tier } = parseSubmitModalCustomId(interaction.customId);
-      await handleSubmitModal(interaction, ladder, tier);
+      const { ladder, tier, multiplyLosses } = parseSubmitModalCustomId(
+        interaction.customId
+      );
+      await handleSubmitModal(interaction, ladder, tier, multiplyLosses);
       return;
     }
 
