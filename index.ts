@@ -1351,28 +1351,6 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
     { name: "Tier", value: approvedTier, inline: true },
     { name: "Room", value: approvedRoom, inline: true },
     { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
-    {
-      name: "Event Multiplier",
-      value: `x${formatMultiplier(result.mmrMultiplier ?? 1)}`,
-      inline: true,
-    },
-    {
-      name: "Multiplier Applies To",
-      value: multiplierScopeLabel(result.multiplyLosses ?? true),
-      inline: true,
-    },
-    {
-      name: "Effective MMR Multiplier",
-      value:
-        result.raceCount == null
-          ? "-"
-          : effectiveMultiplierLabel(
-              result.raceCount,
-              result.mmrMultiplier ?? 1,
-              result.multiplyLosses ?? true
-            ),
-      inline: true,
-    },
     { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
     { name: "View on website", value: `[Message](${mogiUrl})`, inline: true },
   ];
@@ -1393,16 +1371,6 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
     .addFields(
       { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
       { name: "Tier", value: approvedTier, inline: true },
-      {
-        name: "MMR Multiplier",
-        value: `x${formatMultiplier(result.mmrMultiplier ?? 1)}`,
-        inline: true,
-      },
-      {
-        name: "Multiplier Applies To",
-        value: multiplierScopeLabel(result.multiplyLosses ?? true),
-        inline: true,
-      },
       { name: "Updated by", value: `<@${interaction.user.id}>`, inline: true }
     )
     .setImage("attachment://mmr-table.png")
