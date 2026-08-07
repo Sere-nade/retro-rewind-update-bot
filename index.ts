@@ -57,6 +57,8 @@ const REJECT_PREFIX = "reject_mogi:";
 const REJECT_MODAL_PREFIX = "reject_mogi_modal:";
 const PENALTY_PREFIX = "penalty_mogi:";
 const PENALTY_MODAL_PREFIX = "penalty_mogi_modal:";
+const MULTIPLIER_PREFIX = "multiplier_mogi:";
+const MULTIPLIER_MODAL_PREFIX = "multiplier_mogi_modal:";
 const PENALTIES_FIELD_NAME = "Penalties";
 
 type Ladder = "RR" | "CT" | "TT";
@@ -86,6 +88,7 @@ type SubmissionResponse = {
   eventNumber?: number;
   format?: string;
   raceCount?: number;
+  mmrMultiplier?: number;
   roomNumber?: number | null;
   submissionId?: string;
   tableImageBase64?: string;
@@ -108,6 +111,7 @@ type ApproveResponse = {
   mogiId?: string;
   mogiUrl?: string;
   raceCount?: number;
+  mmrMultiplier?: number;
   roomNumber?: number | null;
   rankChanges?: RankChange[];
   tableImageBase64?: string;
@@ -117,6 +121,11 @@ type ApproveResponse = {
 type MogiPenalty = {
   name: string;
   penalty: number;
+};
+
+type MultiplierResponse = {
+  error?: string;
+  mmrMultiplier?: number;
 };
 
 type AdjustmentResponse = {
@@ -172,6 +181,20 @@ function displayTier(tier: string | null | undefined): string {
   const trimmed = tier?.trim() || "All";
   const withoutRepeatedLabel = trimmed.replace(/\btier\b/gi, " ").replace(/\s+/g, " ").trim();
   return withoutRepeatedLabel || "All";
+}
+
+function parseOptionalNumber(value: string, fallback: number): number {
+  const trimmed = value.trim();
+  if (!trimmed) return fallback;
+  return Number(trimmed);
+}
+
+function formatMultiplier(value: number): string {
+  return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function effectiveMultiplier(raceCount: number, mmrMultiplier: number): number {
+  return (raceCount / 12) * mmrMultiplier;
 }
 
 function tierChoicesForLadder(ladder: Ladder): readonly TierChoice[] {
@@ -739,6 +762,15 @@ function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
     .setRequired(false)
     .setMaxLength(10);
 
+  const multiplier = new TextInputBuilder()
+    .setCustomId("mmrMultiplier")
+    .setLabel("MMR multiplier (stacks with races)")
+    .setPlaceholder("1 or 1.5")
+    .setValue("1")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5);
+
   const notes = new TextInputBuilder()
     .setCustomId("notes")
     .setLabel("Notes")
@@ -753,6 +785,7 @@ function buildSubmitModal(ladder: Ladder, tier: string): ModalBuilder {
       new ActionRowBuilder<TextInputBuilder>().addComponents(tableText),
       new ActionRowBuilder<TextInputBuilder>().addComponents(races),
       new ActionRowBuilder<TextInputBuilder>().addComponents(room),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(multiplier),
       new ActionRowBuilder<TextInputBuilder>().addComponents(notes)
     );
 }
@@ -770,6 +803,12 @@ function reviewButtons(submissionId: string, disabled = false) {
         .setCustomId(`${PENALTY_PREFIX}${submissionId}`)
         .setLabel("Add penalty")
         .setEmoji("\u26A0\uFE0F")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(disabled),
+      new ButtonBuilder()
+        .setCustomId(`${MULTIPLIER_PREFIX}${submissionId}`)
+        .setLabel("Set multiplier")
+        .setEmoji("✖️")
         .setStyle(ButtonStyle.Secondary)
         .setDisabled(disabled),
       new ButtonBuilder()
@@ -833,6 +872,10 @@ async function handleSubmitModal(
   const sourceText = interaction.fields.getTextInputValue("tableText");
   const notes = interaction.fields.getTextInputValue("notes").trim();
   const raceCount = parseOptionalInteger(interaction.fields.getTextInputValue("raceCount"), 12);
+  const mmrMultiplier = parseOptionalNumber(
+    interaction.fields.getTextInputValue("mmrMultiplier"),
+    1
+  );
   const roomNumber = parseOptionalInteger(interaction.fields.getTextInputValue("roomNumber"), null);
 
   if (!Number.isInteger(raceCount) || raceCount == null || raceCount < 1 || raceCount > 99) {
@@ -841,6 +884,10 @@ async function handleSubmitModal(
   }
   if (Number.isNaN(roomNumber) || (roomNumber != null && (roomNumber < 1 || roomNumber > 99))) {
     await interaction.editReply("Room number must be blank or a whole number between 1 and 99.");
+    return;
+  }
+  if (!Number.isFinite(mmrMultiplier) || mmrMultiplier < 0.1 || mmrMultiplier > 10) {
+    await interaction.editReply("MMR multiplier must be a number between 0.1 and 10.");
     return;
   }
   if (tier.toLowerCase() === "squad queue" && roomNumber == null) {
@@ -854,6 +901,7 @@ async function handleSubmitModal(
     tier,
     notes: [notes, `Discord ladder: ${ladder}`].filter(Boolean).join("\n"),
     raceCount,
+    mmrMultiplier,
     roomNumber,
     submittedByDiscordId: interaction.user.id,
     submittedFromChannelId: interaction.channelId,
@@ -880,6 +928,21 @@ async function handleSubmitModal(
       { name: "Tier", value: tierLabel, inline: true },
       { name: "Room", value: roomLabel(submission.roomNumber ?? roomNumber), inline: true },
       { name: "Races Played", value: String(submission.raceCount ?? raceCount), inline: true },
+      {
+        name: "Event Multiplier",
+        value: `x${formatMultiplier(submission.mmrMultiplier ?? mmrMultiplier)}`,
+        inline: true,
+      },
+      {
+        name: "Effective MMR Multiplier",
+        value: `x${formatMultiplier(
+          effectiveMultiplier(
+            submission.raceCount ?? raceCount,
+            submission.mmrMultiplier ?? mmrMultiplier
+          )
+        )}`,
+        inline: true,
+      },
       { name: "Submitted by", value: `<@${interaction.user.id}>`, inline: true },
       { name: "Posts to", value: `<#${destinationId}>`, inline: true },
       { name: PENALTIES_FIELD_NAME, value: "-", inline: false }
@@ -1008,6 +1071,110 @@ async function handlePenaltyButton(interaction: ButtonInteraction, submissionId:
   );
 }
 
+async function handleMultiplierButton(
+  interaction: ButtonInteraction,
+  submissionId: string
+): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({
+      content: "You do not have permission to change mogi multipliers.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const currentMultiplier = embedField(interaction, "Event Multiplier").replace(/^x/i, "") || "1";
+  const multiplierInput = new TextInputBuilder()
+    .setCustomId("mmrMultiplier")
+    .setLabel("Event MMR multiplier")
+    .setPlaceholder("1 or 1.5")
+    .setValue(currentMultiplier)
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true)
+    .setMaxLength(5);
+
+  await interaction.showModal(
+    new ModalBuilder()
+      .setCustomId(`${MULTIPLIER_MODAL_PREFIX}${submissionId}:${interaction.message.id}`)
+      .setTitle("Set MMR multiplier")
+      .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(multiplierInput))
+  );
+}
+
+function parseMultiplierModalCustomId(
+  customId: string
+): { submissionId: string; messageId: string } {
+  const [submissionId = "", messageId = ""] = customId
+    .slice(MULTIPLIER_MODAL_PREFIX.length)
+    .split(":");
+  return { submissionId, messageId };
+}
+
+async function handleMultiplierModal(
+  interaction: ModalSubmitInteraction,
+  submissionId: string,
+  messageId: string
+): Promise<void> {
+  if (!hasStaffPermission(interaction)) {
+    await interaction.reply({
+      content: "You do not have permission to change mogi multipliers.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const mmrMultiplier = parseOptionalNumber(
+    interaction.fields.getTextInputValue("mmrMultiplier"),
+    1
+  );
+  if (!Number.isFinite(mmrMultiplier) || mmrMultiplier < 0.1 || mmrMultiplier > 10) {
+    await interaction.reply({
+      content: "MMR multiplier must be a number between 0.1 and 10.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  const result = await apiPost<MultiplierResponse>(
+    `/api/discord/submissions/${submissionId}/multiplier`,
+    { mmrMultiplier }
+  );
+  const savedMultiplier = result.mmrMultiplier;
+  if (savedMultiplier == null) {
+    throw new Error(result.error || "Multiplier API did not return the saved value.");
+  }
+
+  const message = await fetchStaffReviewMessage(interaction.client, messageId);
+  const embed = message?.embeds[0];
+  if (!message || !embed) {
+    await interaction.editReply("Multiplier saved, but I couldn't find the review message to update.");
+    return;
+  }
+
+  const racesField = embed.fields.find((field) => field.name === "Races Played")?.value ?? "12";
+  const raceCount = Number(racesField) || 12;
+  const fields = embed.fields.map((field) => {
+    if (field.name === "Event Multiplier") {
+      return { name: field.name, value: `x${formatMultiplier(savedMultiplier)}`, inline: field.inline };
+    }
+    if (field.name === "Effective MMR Multiplier") {
+      return {
+        name: field.name,
+        value: `x${formatMultiplier(effectiveMultiplier(raceCount, savedMultiplier))}`,
+        inline: field.inline,
+      };
+    }
+    return { name: field.name, value: field.value, inline: field.inline };
+  });
+
+  await message.edit({
+    embeds: [EmbedBuilder.from(embed.toJSON()).setFields(fields)],
+    components: reviewButtons(submissionId),
+  });
+  await interaction.editReply(`Event multiplier set to x${formatMultiplier(savedMultiplier)}.`);
+}
+
 function parsePenaltyModalCustomId(customId: string): { submissionId: string; messageId: string } {
   const [submissionId = "", messageId = ""] = customId.slice(PENALTY_MODAL_PREFIX.length).split(":");
   return { submissionId, messageId };
@@ -1100,6 +1267,19 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
     { name: "Tier", value: approvedTier, inline: true },
     { name: "Room", value: approvedRoom, inline: true },
     { name: "Races Played", value: String(result.raceCount ?? "-"), inline: true },
+    {
+      name: "Event Multiplier",
+      value: `x${formatMultiplier(result.mmrMultiplier ?? 1)}`,
+      inline: true,
+    },
+    {
+      name: "Effective MMR Multiplier",
+      value:
+        result.raceCount == null
+          ? "-"
+          : `x${formatMultiplier(effectiveMultiplier(result.raceCount, result.mmrMultiplier ?? 1))}`,
+      inline: true,
+    },
     { name: "Approved by", value: `<@${interaction.user.id}>`, inline: true },
     { name: "View on website", value: `[Message](${mogiUrl})`, inline: true },
   ];
@@ -1120,6 +1300,11 @@ async function handleApprove(interaction: ButtonInteraction, submissionId: strin
     .addFields(
       { name: "Event ID", value: `[${approvedEventId}](${mogiUrl})`, inline: true },
       { name: "Tier", value: approvedTier, inline: true },
+      {
+        name: "MMR Multiplier",
+        value: `x${formatMultiplier(result.mmrMultiplier ?? 1)}`,
+        inline: true,
+      },
       { name: "Updated by", value: `<@${interaction.user.id}>`, inline: true }
     )
     .setImage("attachment://mmr-table.png")
@@ -1270,6 +1455,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith(MULTIPLIER_PREFIX)) {
+      await handleMultiplierButton(
+        interaction,
+        interaction.customId.slice(MULTIPLIER_PREFIX.length)
+      );
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith(REJECT_PREFIX)) {
       await handleRejectButton(interaction, interaction.customId.slice(REJECT_PREFIX.length));
       return;
@@ -1284,6 +1477,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith(PENALTY_MODAL_PREFIX)) {
       const { submissionId, messageId } = parsePenaltyModalCustomId(interaction.customId);
       await handlePenaltyModal(interaction, submissionId, messageId);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(MULTIPLIER_MODAL_PREFIX)) {
+      const { submissionId, messageId } = parseMultiplierModalCustomId(interaction.customId);
+      await handleMultiplierModal(interaction, submissionId, messageId);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Something went wrong.";
